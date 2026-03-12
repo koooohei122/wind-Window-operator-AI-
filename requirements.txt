@@ -3,6 +3,10 @@
 # Claude API (required)
 anthropic>=0.40.0
 
+# Screen control / execution engine (required for AI to actually operate)
+pyautogui>=0.9.54       # Mouse, keyboard, screenshot control
+pygetwindow>=0.0.9      # Window focus/management
+
 # Screen capture (choose one or both)
 mss>=9.0.1              # Fast cross-platform screen capture
 Pillow>=10.0.0          # Image handling and save

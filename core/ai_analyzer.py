@@ -202,12 +202,30 @@ JSONフォーマットで返答してください。"""
         skills: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         """
-        Understand a user instruction and determine how to execute it.
-        Returns: {steps: [...], skill_name: str, skill_description: str, executable: bool}
+        Understand a user instruction and generate EXECUTABLE actions.
+
+        Returns:
+          {
+            steps: ["説明1", ...],       <- human-readable steps
+            actions: [                    <- machine-executable actions
+              {"type": "launch", "app": "notepad", "description": "メモ帳を起動"},
+              {"type": "type",   "text": "hello",  "description": "テキスト入力"},
+              {"type": "key",    "keys": "ctrl+s",  "description": "保存"},
+              ...
+            ],
+            skill_name: str,
+            skill_description: str,
+            executable: bool
+          }
+
+        Action types supported by Executor:
+          click, double_click, right_click, move, type, key, hotkey,
+          scroll, drag, launch, screenshot, wait, find_and_click, window_focus
         """
         if not self.client:
             return {
                 "steps": ["AIが利用できません。APIキーを設定してください。"],
+                "actions": [],
                 "skill_name": "",
                 "skill_description": "",
                 "executable": False,
@@ -233,29 +251,53 @@ JSONフォーマットで返答してください。"""
                 f"- {s.get('name','')}: {s.get('description','')}" for s in skills[:10]
             )
 
+        action_schema = '''
+利用できるアクションタイプ:
+- {"type":"launch",       "app":"アプリ名またはコマンド", "args":[], "wait_seconds":1.5}
+- {"type":"click",        "x":数値, "y":数値}  または  {"type":"click", "target":"ボタンの説明"}
+- {"type":"double_click", "x":数値, "y":数値}
+- {"type":"right_click",  "x":数値, "y":数値}
+- {"type":"type",         "text":"入力するテキスト", "interval":0.03}
+- {"type":"key",          "keys":"enter"}  または  {"type":"key", "keys":"ctrl+s"}
+- {"type":"hotkey",       "keys":"ctrl+c"}
+- {"type":"find_and_click","target":"クリックする要素の説明（日本語可）"}
+- {"type":"scroll",       "x":数値, "y":数値, "amount":-3}
+- {"type":"wait",         "seconds":1.0}
+- {"type":"screenshot",   "save":true}
+- {"type":"window_focus", "title":"ウィンドウタイトル"}
+
+各アクションに "description": "説明" を追加してください。
+targetで要素を指定すると、AIが画面から自動的に位置を探します。
+'''
+
         content.append({
             "type": "text",
             "text": (
                 f"ユーザーの指示: 「{instruction}」\n\n"
                 f"{skills_text}\n\n"
-                "この指示を実行するための手順を考えてください。\n"
-                "以下のJSON形式で返答:\n"
-                '{"steps": ["手順1", "手順2", ...], '
-                '"skill_name": "このスキルの名前（英語スネークケース）", '
-                '"skill_description": "このスキルの説明（日本語100文字以内）", '
-                '"executable": true/false}'
+                f"{action_schema}\n"
+                "この指示を実行するための手順とアクションを考えてください。\n"
+                "スクリーンショットで現在の画面状態が見える場合は、それを参考にしてください。\n\n"
+                "必ず以下のJSON形式で返答:\n"
+                '{"steps": ["手順の説明1", "手順の説明2", ...], '
+                '"actions": [<アクションオブジェクトのリスト>], '
+                '"skill_name": "スキル名（英語スネークケース）", '
+                '"skill_description": "スキルの説明（日本語100文字以内）", '
+                '"executable": true}'
             ),
         })
 
         try:
             with self.client.messages.stream(
                 model=config.CLAUDE_MODEL,
-                max_tokens=1024,
+                max_tokens=2048,
                 thinking={"type": "adaptive"},
                 system=(
-                    "あなたは画面操作を実行するAIアシスタントです。"
-                    "ユーザーの指示を理解し、具体的な実行手順を考えてください。"
-                    "現在の画面状態を考慮して、最適な方法を提案してください。"
+                    "あなたは画面操作を実行するAIアシスタントです。\n"
+                    "ユーザーの指示を理解し、実際に実行可能なアクションリストを生成してください。\n"
+                    "現在の画面状態（スクリーンショット）を参考に、正確な操作手順を考えてください。\n"
+                    "座標が不明な場合は target フィールドで要素を説明してください。\n"
+                    "必ずJSONのみを返してください。"
                 ),
                 messages=[{"role": "user", "content": content}],
             ) as stream:
@@ -264,6 +306,7 @@ JSONフォーマットで返答してください。"""
             raw_text = next((b.text for b in response.content if b.type == "text"), "")
             result = self._parse_json_response(raw_text)
             result.setdefault("steps", [raw_text])
+            result.setdefault("actions", [])
             result.setdefault("skill_name", "custom_task")
             result.setdefault("skill_description", instruction[:100])
             result.setdefault("executable", True)
@@ -273,6 +316,7 @@ JSONフォーマットで返答してください。"""
             logger.error(f"Instruction understanding error: {e}")
             return {
                 "steps": [f"エラー: {str(e)}"],
+                "actions": [],
                 "skill_name": "",
                 "skill_description": "",
                 "executable": False,

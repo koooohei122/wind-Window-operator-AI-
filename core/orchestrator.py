@@ -16,6 +16,7 @@ from core.memory_manager import MemoryManager
 from core.cleanup_manager import CleanupManager
 from core.recommender import Recommender
 from core.skill_recorder import SkillRecorder
+from core.executor import Executor, ActionResult
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,13 @@ class Orchestrator:
         on_recommendation: Optional[Callable] = None,    # (text: str)
         on_analysis_done: Optional[Callable] = None,     # (analysis: dict)
         on_capture: Optional[Callable] = None,           # (paths: list, ts)
+        on_action: Optional[Callable] = None,            # (result: ActionResult)
         capture_mode: str = None,
     ):
         self.on_status_update = on_status_update
         self.on_recommendation = on_recommendation
         self.on_analysis_done = on_analysis_done
+        self.on_action = on_action
 
         # Modules
         self.capture = CaptureManager(
@@ -48,6 +51,10 @@ class Orchestrator:
         self.cleanup = CleanupManager(on_cleanup=self._on_cleanup)
         self.recommender = Recommender(on_text_recommendation=on_recommendation)
         self.skills = SkillRecorder()
+        self.executor = Executor(
+            on_action=on_action,
+            on_status=on_status_update,
+        )
 
         # State
         self._running = False
@@ -113,27 +120,63 @@ class Orchestrator:
         self._status("停止完了")
         logger.info("Orchestrator stopped")
 
-    def execute_instruction(self, instruction: str) -> Dict[str, Any]:
+    def execute_instruction(
+        self,
+        instruction: str,
+        auto_execute: bool = True,
+    ) -> Dict[str, Any]:
         """
-        Receive a user instruction, understand it, execute steps,
+        Receive a user instruction, understand it, EXECUTE it,
         and record it as a skill.
+
+        auto_execute: If True, actually run the actions on screen.
+                      If False, just plan (dry run).
         """
         self._status(f"指示を処理中: {instruction[:50]}")
 
-        # Get current screenshot for context
-        current_screenshot = None
-        if self._recent_screenshots:
-            current_screenshot = self._recent_screenshots[-1]
+        # Take a fresh screenshot for context
+        fresh_paths = self.capture_now()
+        current_screenshot = fresh_paths[0] if fresh_paths else (
+            self._recent_screenshots[-1] if self._recent_screenshots else None
+        )
 
         # Get available skills
         relevant_skills = self.skills.search(instruction, max_results=5)
 
-        # Ask AI to understand and plan execution
+        # Ask AI to understand and generate executable actions
         analysis = self.analyzer.understand_and_execute(
             instruction=instruction,
             screenshot_path=current_screenshot,
             skills=relevant_skills,
         )
+
+        actions = analysis.get("actions", [])
+        steps = analysis.get("steps", [])
+
+        self._status(
+            f"実行計画: {len(steps)}ステップ / {len(actions)}アクション"
+        )
+
+        # Execute actions on screen
+        results = []
+        if auto_execute and actions and analysis.get("executable", False):
+            self._status(f"実行開始...")
+            results = self.executor.execute_plan(
+                actions=actions,
+                description=instruction,
+            )
+            success_count = sum(1 for r in results if r.success)
+            self._status(
+                f"実行完了: {success_count}/{len(results)} 成功"
+            )
+
+            # Take a screenshot after execution to verify
+            verify_paths = self.capture_now()
+            if verify_paths:
+                self._run_analysis()   # Re-analyze post-execution state
+        else:
+            if not actions:
+                self._status("実行可能なアクションが生成されませんでした（計画のみ）")
 
         # Record the skill
         if analysis.get("skill_name"):
@@ -145,17 +188,22 @@ class Orchestrator:
                 )
                 self._status(f"スキル記録: {skill.name}")
 
-        # Return the execution plan
-        steps = analysis.get("steps", [])
-        self._status(f"実行計画: {len(steps)}ステップ")
-
         return {
             "instruction": instruction,
             "steps": steps,
+            "actions": actions,
+            "results": [r.to_dict() for r in results],
             "skill_name": analysis.get("skill_name", ""),
             "executable": analysis.get("executable", False),
+            "success_count": sum(1 for r in results if r.success),
+            "total_actions": len(actions),
             "timestamp": datetime.datetime.now().isoformat(),
         }
+
+    def abort_execution(self):
+        """Abort the currently running execution."""
+        self.executor.abort()
+        self._status("実行を中断しました")
 
     def capture_now(self) -> List[str]:
         """Force an immediate screenshot."""

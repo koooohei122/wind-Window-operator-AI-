@@ -77,6 +77,7 @@ class MainWindow:
                 on_recommendation=self._on_recommendation,
                 on_analysis_done=self._on_analysis,
                 on_capture=self._on_capture,
+                on_action=self._on_action,
                 capture_mode=self.mode_var.get(),
             )
         except Exception as e:
@@ -246,15 +247,43 @@ class MainWindow:
         self.instruction_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=5, padx=(0, 5))
         self.instruction_entry.bind("<Return>", lambda e: self._send_instruction())
 
+        # Auto-execute toggle
+        self.auto_exec_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            inst_input_frame,
+            text="自動実行",
+            variable=self.auto_exec_var,
+            font=self.font_small,
+            bg=self.COLORS["surface"],
+            fg=self.COLORS["fg"],
+            selectcolor=self.COLORS["surface2"],
+            activebackground=self.COLORS["surface"],
+            activeforeground=self.COLORS["fg"],
+            relief=tk.FLAT,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
         tk.Button(
             inst_input_frame,
-            text="実行",
+            text="▶ 実行",
             font=self.font_bold,
             bg=self.COLORS["accent"],
             fg=self.COLORS["bg"],
             relief=tk.FLAT, padx=10,
             command=self._send_instruction,
         ).pack(side=tk.LEFT)
+
+        # Abort button
+        self.abort_btn = tk.Button(
+            inst_input_frame,
+            text="⏹ 中断",
+            font=self.font_normal,
+            bg=self.COLORS["button_stop"],
+            fg=self.COLORS["bg"],
+            relief=tk.FLAT, padx=8,
+            command=self._abort_execution,
+            state=tk.DISABLED,
+        )
+        self.abort_btn.pack(side=tk.LEFT, padx=(4, 0))
 
         # Right panel
         right_panel = tk.Frame(main_frame, bg=self.COLORS["bg"], width=320)
@@ -433,25 +462,50 @@ class MainWindow:
             self._append_analysis("エラー: システムが初期化されていません\n")
             return
 
+        # Disable send, enable abort
+        self.abort_btn.config(state=tk.NORMAL)
+
         threading.Thread(
             target=self._process_instruction,
             args=(instruction,),
             daemon=True,
         ).start()
 
+    def _abort_execution(self):
+        if self._orchestrator:
+            self._orchestrator.abort_execution()
+        self.abort_btn.config(state=tk.DISABLED)
+
     def _process_instruction(self, instruction: str):
-        result = self._orchestrator.execute_instruction(instruction)
+        auto_exec = self.auto_exec_var.get()
+        result = self._orchestrator.execute_instruction(
+            instruction,
+            auto_execute=auto_exec,
+        )
         steps = result.get("steps", [])
+        actions = result.get("actions", [])
+        results = result.get("results", [])
         skill = result.get("skill_name", "")
+        success = result.get("success_count", 0)
+        total = result.get("total_actions", 0)
 
         output = []
         if skill:
-            output.append(f"[スキル] {skill}")
+            output.append(f"[スキル記録] {skill}")
         output.append("[実行手順]")
         for i, step in enumerate(steps, 1):
             output.append(f"  {i}. {step}")
 
+        if actions:
+            output.append(f"[アクション: {success}/{total} 成功]")
+            for r in results:
+                icon = "✓" if r.get("success") else "✗"
+                act = r.get("action", {})
+                msg = r.get("message", "")
+                output.append(f"  {icon} [{act.get('type','')}] {msg}")
+
         self.root.after(0, self._append_analysis, "\n".join(output) + "\n")
+        self.root.after(0, lambda: self.abort_btn.config(state=tk.DISABLED))
 
     # ─── Orchestrator callbacks ───────────────────────────────────────────
 
@@ -472,6 +526,14 @@ class MainWindow:
         ts = timestamp.strftime("%H:%M:%S")
         msg = f"[{ts}] キャプチャ: {len(paths)}件"
         self.root.after(0, self._update_status_bar, msg)
+
+    def _on_action(self, result):
+        """Called after each individual action is executed."""
+        icon = "✓" if result.success else "✗"
+        act_type = result.action.get("type", "")
+        msg = result.message
+        line = f"  {icon} {act_type}: {msg}\n"
+        self.root.after(0, self._append_analysis, line)
 
     # ─── UI update methods ────────────────────────────────────────────────
 
