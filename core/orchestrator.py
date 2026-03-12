@@ -17,6 +17,7 @@ from core.cleanup_manager import CleanupManager
 from core.recommender import Recommender
 from core.skill_recorder import SkillRecorder
 from core.executor import Executor, ActionResult
+from core.computer_use_agent import ComputerUseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,8 @@ class Orchestrator:
             on_action=on_action,
             on_status=on_status_update,
         )
+        self.computer_use: Optional[ComputerUseAgent] = None
+        self._on_thinking_cb: Optional[Callable] = None
 
         # State
         self._running = False
@@ -204,6 +207,41 @@ class Orchestrator:
         """Abort the currently running execution."""
         self.executor.abort()
         self._status("実行を中断しました")
+
+    def execute_with_computer_use(
+        self,
+        goal: str,
+        on_thinking: Optional[Callable] = None,
+        on_cu_action: Optional[Callable] = None,
+        on_complete: Optional[Callable] = None,
+    ) -> None:
+        """
+        Execute a goal using the Computer Use API (cutting-edge mode).
+
+        This runs Claude Opus 4.6 in a true agentic loop:
+          screenshot → think → act → screenshot → ... → done
+
+        All callbacks are called from a background thread.
+        Monitor progress via on_thinking / on_cu_action / on_complete.
+
+        on_thinking(text): Claude's internal reasoning (interleaved thinking)
+        on_cu_action(action, success, msg): Each action Claude takes
+        on_complete(summary): Final summary when done
+        """
+        self.computer_use = ComputerUseAgent(
+            api_key=config.ANTHROPIC_API_KEY,
+            on_thinking=on_thinking,
+            on_action=on_cu_action,
+            on_screenshot=None,
+            on_status=self.on_status_update,
+            on_complete=on_complete,
+        )
+        self.computer_use.run(goal, background=True)
+
+    def abort_computer_use(self):
+        """Abort the currently running Computer Use agent."""
+        if self.computer_use:
+            self.computer_use.abort()
 
     def capture_now(self) -> List[str]:
         """Force an immediate screenshot."""

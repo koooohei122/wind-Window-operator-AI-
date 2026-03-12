@@ -229,9 +229,31 @@ class MainWindow:
         )
         self.analysis_text.pack(fill=tk.BOTH, expand=True)
 
-        # Instruction input
-        inst_frame = self._labeled_frame(left_panel, "⌨️ 指示入力 (AIへの操作指示)")
+        # Instruction input area (tabs: Standard / Computer Use)
+        inst_frame = self._labeled_frame(left_panel, "⌨️ 指示入力")
         inst_frame.pack(fill=tk.X)
+
+        # Mode selector
+        mode_bar = tk.Frame(inst_frame, bg=self.COLORS["surface"])
+        mode_bar.pack(fill=tk.X, pady=(0, 4))
+
+        self._input_mode = tk.StringVar(value="standard")
+
+        tk.Radiobutton(
+            mode_bar, text="標準モード", variable=self._input_mode, value="standard",
+            font=self.font_small, bg=self.COLORS["surface"], fg=self.COLORS["fg"],
+            selectcolor=self.COLORS["surface2"], activebackground=self.COLORS["surface"],
+            activeforeground=self.COLORS["fg"], relief=tk.FLAT,
+            command=self._on_mode_change,
+        ).pack(side=tk.LEFT)
+
+        tk.Radiobutton(
+            mode_bar, text="★ Computer Use (最先端)", variable=self._input_mode, value="computer_use",
+            font=self.font_small, bg=self.COLORS["surface"], fg=self.COLORS["yellow"],
+            selectcolor=self.COLORS["surface2"], activebackground=self.COLORS["surface"],
+            activeforeground=self.COLORS["yellow"], relief=tk.FLAT,
+            command=self._on_mode_change,
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         inst_input_frame = tk.Frame(inst_frame, bg=self.COLORS["surface"])
         inst_input_frame.pack(fill=tk.X)
@@ -293,6 +315,41 @@ class MainWindow:
         # Tabbed right panel
         notebook = ttk.Notebook(right_panel)
         notebook.pack(fill=tk.BOTH, expand=True)
+        self._notebook = notebook
+
+        # ── Computer Use Thinking tab ──────────────────────────────────────
+        thinking_tab = tk.Frame(notebook, bg=self.COLORS["bg"])
+        notebook.add(thinking_tab, text="🧠 Thinking")
+
+        tk.Label(
+            thinking_tab, text="Claude の思考プロセス (Computer Use)",
+            font=self.font_small, bg=self.COLORS["bg"], fg=self.COLORS["yellow"],
+        ).pack(anchor=tk.W, padx=5, pady=(5, 0))
+
+        self.thinking_text = scrolledtext.ScrolledText(
+            thinking_tab, wrap=tk.WORD,
+            font=("Courier", 9),
+            bg="#1a1a2e",
+            fg="#a0c4ff",
+            insertbackground=self.COLORS["fg"],
+            relief=tk.FLAT, padx=6, pady=4,
+        )
+        self.thinking_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+
+        # CU action log
+        tk.Label(
+            thinking_tab, text="アクション履歴",
+            font=self.font_small, bg=self.COLORS["bg"], fg=self.COLORS["accent"],
+        ).pack(anchor=tk.W, padx=5)
+
+        self.cu_action_text = scrolledtext.ScrolledText(
+            thinking_tab, height=8, wrap=tk.WORD,
+            font=self.font_mono,
+            bg=self.COLORS["surface"],
+            fg=self.COLORS["fg"],
+            relief=tk.FLAT, padx=4,
+        )
+        self.cu_action_text.pack(fill=tk.X, padx=5, pady=(0, 5))
 
         # Memory tab
         mem_tab = tk.Frame(notebook, bg=self.COLORS["bg"])
@@ -447,6 +504,17 @@ class MainWindow:
         except Exception as e:
             self._on_status(f"保存エラー: {e}")
 
+    def _on_mode_change(self):
+        """Update UI hint when mode changes."""
+        if self._input_mode.get() == "computer_use":
+            self.instruction_entry.config(
+                fg=self.COLORS["yellow"],
+            )
+        else:
+            self.instruction_entry.config(
+                fg=self.COLORS["fg"],
+            )
+
     def _send_instruction(self):
         instruction = self.instruction_entry.get().strip()
         if not instruction:
@@ -462,18 +530,64 @@ class MainWindow:
             self._append_analysis("エラー: システムが初期化されていません\n")
             return
 
-        # Disable send, enable abort
         self.abort_btn.config(state=tk.NORMAL)
 
-        threading.Thread(
-            target=self._process_instruction,
-            args=(instruction,),
-            daemon=True,
-        ).start()
+        mode = self._input_mode.get()
+        if mode == "computer_use":
+            self._start_computer_use(instruction)
+        else:
+            threading.Thread(
+                target=self._process_instruction,
+                args=(instruction,),
+                daemon=True,
+            ).start()
+
+    def _start_computer_use(self, goal: str):
+        """Start the Computer Use agentic loop."""
+        self._append_analysis("[Computer Use] 開始...\n")
+        # Switch to Thinking tab
+        self.root.after(0, lambda: self._notebook.select(0))
+
+        self._orchestrator.execute_with_computer_use(
+            goal=goal,
+            on_thinking=self._on_cu_thinking,
+            on_cu_action=self._on_cu_action_event,
+            on_complete=self._on_cu_complete,
+        )
+
+    def _on_cu_thinking(self, text: str):
+        """Called when Claude emits thinking content."""
+        def update():
+            self.thinking_text.insert(tk.END, f"\n{'─'*40}\n{text}\n")
+            self.thinking_text.see(tk.END)
+            # Keep max 200 lines
+            lines = int(self.thinking_text.index(tk.END).split(".")[0])
+            if lines > 200:
+                self.thinking_text.delete("1.0", f"{lines-200}.0")
+        self.root.after(0, update)
+
+    def _on_cu_action_event(self, action: dict, success: bool, msg: str):
+        """Called after each Computer Use action."""
+        icon = "✓" if success else "✗"
+        act_type = action.get("action", "")
+        line = f"  {icon} {act_type}: {msg}\n"
+        def update():
+            self.cu_action_text.insert(tk.END, line)
+            self.cu_action_text.see(tk.END)
+            self._append_analysis(line)
+        self.root.after(0, update)
+
+    def _on_cu_complete(self, summary: str):
+        """Called when Computer Use agent finishes."""
+        def update():
+            self._append_analysis(f"\n[Computer Use 完了] {summary}\n")
+            self.abort_btn.config(state=tk.DISABLED)
+        self.root.after(0, update)
 
     def _abort_execution(self):
         if self._orchestrator:
             self._orchestrator.abort_execution()
+            self._orchestrator.abort_computer_use()
         self.abort_btn.config(state=tk.DISABLED)
 
     def _process_instruction(self, instruction: str):
