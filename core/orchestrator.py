@@ -18,6 +18,9 @@ from core.recommender import Recommender
 from core.skill_recorder import SkillRecorder
 from core.executor import Executor, ActionResult
 from core.computer_use_agent import ComputerUseAgent
+from core.task_manager import TaskManager, Job, Task, JobRun
+from core.job_runner import JobRunner
+from core.job_scheduler import JobScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +38,20 @@ class Orchestrator:
         on_analysis_done: Optional[Callable] = None,     # (analysis: dict)
         on_capture: Optional[Callable] = None,           # (paths: list, ts)
         on_action: Optional[Callable] = None,            # (result: ActionResult)
+        on_job_start: Optional[Callable] = None,         # (job, run)
+        on_job_done: Optional[Callable] = None,          # (job, run)
+        on_task_start: Optional[Callable] = None,        # (task, task_result)
+        on_task_done: Optional[Callable] = None,         # (task, task_result)
         capture_mode: str = None,
     ):
         self.on_status_update = on_status_update
         self.on_recommendation = on_recommendation
         self.on_analysis_done = on_analysis_done
         self.on_action = on_action
+        self.on_job_start = on_job_start
+        self.on_job_done = on_job_done
+        self.on_task_start = on_task_start
+        self.on_task_done = on_task_done
 
         # Modules
         self.capture = CaptureManager(
@@ -58,6 +69,22 @@ class Orchestrator:
         )
         self.computer_use: Optional[ComputerUseAgent] = None
         self._on_thinking_cb: Optional[Callable] = None
+
+        # Job / Task system
+        self.task_manager = TaskManager()
+        self.job_runner = JobRunner(
+            task_manager=self.task_manager,
+            on_job_start=on_job_start,
+            on_task_start=on_task_start,
+            on_task_done=on_task_done,
+            on_job_done=on_job_done,
+            on_status=self._status,
+        )
+        self.job_scheduler = JobScheduler(
+            task_manager=self.task_manager,
+            on_trigger=self._on_scheduled_job,
+            on_status=self._status,
+        )
 
         # State
         self._running = False
@@ -84,6 +111,7 @@ class Orchestrator:
         self.cleanup.start()
         self.recommender.start()
         self.capture.start()
+        self.job_scheduler.start()
 
         # Start analysis loop
         self._analysis_thread = threading.Thread(
@@ -114,6 +142,7 @@ class Orchestrator:
         self.capture.stop()
         self.cleanup.stop()
         self.recommender.stop()
+        self.job_scheduler.stop()
 
         if self._analysis_thread:
             self._analysis_thread.join(timeout=5)
@@ -237,6 +266,25 @@ class Orchestrator:
             on_complete=on_complete,
         )
         self.computer_use.run(goal, background=True)
+
+    # ─── Job / Task API ───────────────────────────────────────────────────
+
+    def run_job(self, job: Job, triggered_by: str = "manual") -> None:
+        """Start a Job asynchronously. Progress via on_job_start/done callbacks."""
+        if self.job_runner.is_running:
+            self._status("別のジョブが実行中です。完了後にお試しください。")
+            return
+        self.job_runner.run_job_async(job, triggered_by=triggered_by)
+
+    def abort_job(self):
+        """Abort the currently running job."""
+        self.job_runner.abort()
+        self._status("ジョブを中断しました")
+
+    def _on_scheduled_job(self, job: Job, triggered_by: str):
+        """Called by JobScheduler when a job is due."""
+        self._status(f"スケジュール起動: {job.name}")
+        self.run_job(job, triggered_by=triggered_by)
 
     def abort_computer_use(self):
         """Abort the currently running Computer Use agent."""
